@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Models and checkpoints
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Data files
+/data/
+*.json
+*.csv
+
+# Logs
+logs/
+*.log
+wandb/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# uv
+# uv.lock  # Uncomment to ignore lock file, or commit it for reproducibility
+.python-version
+
+# PyTorch CUDA
+# No specific files to ignore, but note CUDA version requirements in documentation

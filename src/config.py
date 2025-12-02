@@ -1,0 +1,140 @@
+"""Configuration management with proper type handling."""
+
+from dataclasses import dataclass, field
+from typing import List, Optional
+from pathlib import Path
+import yaml
+
+
+@dataclass
+class ModelConfig:
+    model_name: str = "gpt2"
+    max_length: int = 512
+    temperature: float = 0.7
+    use_learned_policy: bool = True
+
+
+@dataclass
+class GameConfig:
+    max_turns: int = 10
+    min_benign_turns: int = 1
+    safety_threshold: float = 0.5
+    utility_weight: float = 0.3
+    safety_weight: float = 0.7
+    terminate_on_violation: bool = False
+
+
+@dataclass
+class TrainingConfig:
+    mode: str = "equilibrium"
+    num_episodes: int = 10000
+    batch_size: int = 32
+    defender_lr: float = 1e-5
+    adversary_lr: float = 1e-5
+    gamma: float = 0.99
+    save_interval: int = 1000
+    eval_interval: int = 500
+    checkpoint_dir: str = "checkpoints"
+    update_mode: str = "alternating"
+
+
+@dataclass
+class DataConfig:
+    train_datasets: List[str] = field(default_factory=lambda: ["xguard"])
+    val_datasets: List[str] = field(default_factory=lambda: ["mhj"])
+    data_dir: str = "data"
+    split_seed: int = 42
+
+
+@dataclass
+class LoggingConfig:
+    use_wandb: bool = False
+    log_dir: str = "logs"
+    log_interval: int = 100
+
+
+@dataclass
+class Config:
+    defender: ModelConfig = field(default_factory=ModelConfig)
+    adversary: ModelConfig = field(
+        default_factory=lambda: ModelConfig(max_length=256, temperature=0.9)
+    )
+    game: GameConfig = field(default_factory=GameConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
+    data: DataConfig = field(default_factory=DataConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+
+
+def load_config(config_path: str) -> Config:
+    """Load configuration from YAML file with proper type conversion."""
+    with open(config_path, "r") as f:
+        raw = yaml.safe_load(f)
+
+    config = Config()
+
+    # Parse model configs
+    if "model" in raw:
+        if "defender" in raw["model"]:
+            d = raw["model"]["defender"]
+            config.defender = ModelConfig(
+                model_name=d.get("model_name", "gpt2"),
+                max_length=int(d.get("max_length", 512)),
+                temperature=float(d.get("temperature", 0.7)),
+                use_learned_policy=bool(d.get("use_learned_policy", True)),
+            )
+        if "adversary" in raw["model"]:
+            a = raw["model"]["adversary"]
+            config.adversary = ModelConfig(
+                model_name=a.get("model_name", "gpt2"),
+                max_length=int(a.get("max_length", 256)),
+                temperature=float(a.get("temperature", 0.9)),
+                use_learned_policy=bool(a.get("use_learned_policy", False)),
+            )
+    # Parse game config
+    if "game" in raw:
+        g = raw["game"]
+        config.game = GameConfig(
+            max_turns=int(g.get("max_turns", 10)),
+            min_benign_turns=int(g.get("min_benign_turns", 1)),
+            safety_threshold=float(g.get("safety_threshold", 0.5)),
+            utility_weight=float(g.get("utility_weight", 0.3)),
+            safety_weight=float(g.get("safety_weight", 0.7)),
+            terminate_on_violation=bool(g.get("terminate_on_violation", False)),
+        )
+
+    # Parse training config
+    if "training" in raw:
+        t = raw["training"]
+        config.training = TrainingConfig(
+            mode=str(t.get("mode", "equilibrium")),
+            num_episodes=int(t.get("num_episodes", 10000)),
+            batch_size=int(t.get("batch_size", 32)),
+            defender_lr=float(t.get("defender_lr", 1e-5)),
+            adversary_lr=float(t.get("adversary_lr", 1e-5)),
+            gamma=float(t.get("gamma", 0.99)),
+            save_interval=int(t.get("save_interval", 1000)),
+            eval_interval=int(t.get("eval_interval", 500)),
+            checkpoint_dir=str(t.get("checkpoint_dir", "checkpoints")),
+            update_mode=str(t.get("update_mode", "alternating")),
+        )
+
+    # Parse data config
+    if "data" in raw:
+        d = raw["data"]
+        config.data = DataConfig(
+            train_datasets=d.get("train_datasets", ["xguard"]),
+            val_datasets=d.get("val_datasets", ["mhj"]),
+            data_dir=str(d.get("data_dir", "data")),
+            split_seed=int(d.get("split_seed", 42)),
+        )
+
+    # Parse logging config
+    if "logging" in raw:
+        l = raw["logging"]
+        config.logging = LoggingConfig(
+            use_wandb=bool(l.get("use_wandb", False)),
+            log_dir=str(l.get("log_dir", "logs")),
+            log_interval=int(l.get("log_interval", 100)),
+        )
+
+    return config

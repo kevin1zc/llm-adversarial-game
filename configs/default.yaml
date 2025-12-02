@@ -1,0 +1,54 @@
+# Default configuration for multi-turn censorship game
+
+model:
+  defender:
+    model_name: "gpt2"
+    max_length: 512
+    temperature: 0.7
+    use_learned_policy: true
+  adversary:
+    model_name: "gpt2"
+    max_length: 256
+    temperature: 0.9
+    use_learned_policy: true
+
+game:
+  max_turns: 10
+  min_benign_turns: 1
+  safety_threshold: 0.5
+  utility_weight: 0.3
+  safety_weight: 0.7
+  terminate_on_violation: false
+
+training:
+  mode: "equilibrium"  # "self_play" or "equilibrium"
+  num_episodes: 10000
+  batch_size: 16
+  defender_lr: 0.00001
+  adversary_lr: 0.00001
+  gamma: 0.99
+  save_interval: 500
+  eval_interval: 200
+  checkpoint_dir: "checkpoints"
+  update_mode: "alternating"
+
+data:
+  train_datasets:
+    - "xguard"
+  val_datasets:
+    - "mhj"
+  data_dir: "data"
+  split_seed: 42
+
+evaluation:
+  metrics:
+    - "attack_success_rate"
+    - "turn_of_failure"
+    - "utility_score"
+    - "safety_score"
+  num_eval_samples: 500
+
+logging:
+  use_wandb: false
+  log_dir: "logs"
+  log_interval: 20
