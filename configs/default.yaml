@@ -13,24 +13,30 @@ model:
     use_learned_policy: true
 
 game:
-  max_turns: 10
-  min_benign_turns: 1
+  max_turns: 7
   safety_threshold: 0.5
-  utility_weight: 0.3
-  safety_weight: 0.7
-  terminate_on_violation: false
+  refuse_threshold: 0.5
+  utility_weight: 0.4
+  safety_weight: 0.6
+  terminate_on_violation: true
+  benign_prob: 0.5
+  lambda_violation: 5.0
+  mu_refusal: 0.2
+  gamma_turn: 0.01
 
 training:
-  mode: "equilibrium"  # "self_play" or "equilibrium"
-  num_episodes: 10000
-  batch_size: 16
+  mode: "equilibrium"
+  num_episodes: 1000
+  batch_size: 32
   defender_lr: 0.00001
   adversary_lr: 0.00001
   gamma: 0.99
-  save_interval: 500
   eval_interval: 200
+  eval_num_malicious: 100
+  eval_num_benign: 100
   checkpoint_dir: "checkpoints"
   update_mode: "alternating"
+  warmstart_steps: 200
 
 data:
   train_datasets:
@@ -39,14 +45,6 @@ data:
     - "mhj"
   data_dir: "data"
   split_seed: 42
-
-evaluation:
-  metrics:
-    - "attack_success_rate"
-    - "turn_of_failure"
-    - "utility_score"
-    - "safety_score"
-  num_eval_samples: 500
 
 logging:
   use_wandb: false

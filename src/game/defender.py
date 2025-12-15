@@ -1,5 +1,3 @@
-"""Defender agent that decides whether to respond or refuse."""
-
 from typing import Optional, Dict, Any, Tuple
 import torch
 import torch.nn as nn
@@ -9,47 +7,40 @@ from .environment import GameState, ActionType
 
 
 class DefenderPolicy(nn.Module):
-    """Policy network for the defender agent."""
-
     def __init__(
         self,
         model_name: str = "gpt2",
         hidden_dim: int = 256,
     ):
-        """Initialize defender policy."""
         super().__init__()
         self.base_model = AutoModelForCausalLM.from_pretrained(model_name)
         hidden_size = self.base_model.config.hidden_size
 
-        # Decision head: respond vs refuse
         self.decision_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim // 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 2),  # [respond, refuse]
+            nn.Linear(hidden_dim // 2, 2),
         )
 
-        # Response generation uses base model
-
     def forward(self, input_ids, attention_mask=None):
-        """Forward pass."""
         outputs = self.base_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             output_hidden_states=True,
         )
-        # Use last hidden state for decision
         hidden_states = outputs.hidden_states[-1]
-        # Pool over sequence length (mean pooling)
-        pooled = hidden_states.mean(dim=1)
+        if attention_mask is None:
+            pooled = hidden_states[:, -1, :]
+        else:
+            last_idx = attention_mask.sum(dim=1).clamp_min(1) - 1
+            pooled = hidden_states[torch.arange(hidden_states.size(0), device=hidden_states.device), last_idx]
         decision_logits = self.decision_head(pooled)
         return decision_logits, outputs
 
 
 class DefenderAgent:
-    """Defender agent that decides whether to respond or refuse."""
-
     def __init__(
         self,
         model_name: str = "gpt2",
@@ -58,64 +49,29 @@ class DefenderAgent:
         temperature: float = 0.7,
         use_policy: bool = True,
     ):
-        """
-        Initialize defender agent.
-
-        Args:
-            model_name: Name of the language model
-            device: Device to run on
-            max_length: Maximum generation length
-            temperature: Sampling temperature
-            use_policy: Whether to use learned policy or rule-based
-        """
         self.device = device
         self.max_length = max_length
         self.temperature = temperature
         self.use_policy = use_policy
         self.model_name = model_name
 
-        # Initialize model to None first
-        self.model = None
         self.policy = None
 
-        # Load tokenizer
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             if self.tokenizer.pad_token is None:
-                # Add a proper pad token instead of reusing eos_token
                 self.tokenizer.pad_token = self.tokenizer.eos_token
                 self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-                # Set padding side to left for decoder-only models (like GPT-2)
                 self.tokenizer.padding_side = "left"
         except Exception as e:
             print(f"Warning: Could not load tokenizer: {e}")
             self.tokenizer = None
 
-        # Initialize policy if using learned policy
-        if use_policy:
-            try:
-                self.policy = DefenderPolicy(model_name).to(device)
-                self.policy.eval()
-                # Policy has base_model, so we can use it for generation
-            except Exception as e:
-                print(f"Warning: Could not load policy: {e}")
-                self.use_policy = False
-                self.policy = None
-                # Fall back to loading base model
-                try:
-                    self.model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
-                    self.model.eval()
-                except Exception as e2:
-                    print(f"Warning: Could not load model: {e2}")
-                    self.model = None
-        else:
-            # Load base model for response generation
-            try:
-                self.model = AutoModelForCausalLM.from_pretrained(model_name).to(device)
-                self.model.eval()
-            except Exception as e:
-                print(f"Warning: Could not load model: {e}")
-                self.model = None
+        if not use_policy:
+            raise ValueError("DefenderAgent requires use_policy=True")
+
+        self.policy = DefenderPolicy(model_name).to(device)
+        self.policy.train()
 
     def decide_action(
         self,
@@ -124,169 +80,131 @@ class DefenderAgent:
         safety_score: float,
         safety_threshold: float = 0.5,
         explore: bool = False,
+        generate_response: bool = True,
+        refuse_threshold: float = 0.5,
     ) -> Tuple[ActionType, Optional[str]]:
-        """
-        Decide whether to respond or refuse.
+        action, resp, _ = self.decide_action_with_logprob(
+            state=state,
+            user_message=user_message,
+            explore=explore,
+            generate_response=generate_response,
+            refuse_threshold=refuse_threshold,
+            do_sample=True,
+        )
+        return action, resp
 
-        Args:
-            state: Current game state
-            user_message: User's message
-            safety_score: Safety score of the message
-            safety_threshold: Threshold for safety
-
-        Returns:
-            Tuple of (action_type, response_message)
-        """
-        # Rule-based decision (can be replaced with learned policy)
-        if self.use_policy and self.policy is not None:
-            return self._decide_with_policy(state, user_message, safety_score, explore)
-        else:
-            return self._decide_rule_based(state, user_message, safety_score, safety_threshold)
-
-    def _decide_with_policy(
+    def decide_action_with_logprob(
         self,
         state: GameState,
         user_message: str,
-        safety_score: float,
-        explore: bool = False,
-    ) -> Tuple[ActionType, Optional[str]]:
-        """Decide using learned policy."""
-        # Prepare input
+        explore: bool = True,
+        generate_response: bool = True,
+        refuse_threshold: float = 0.5,
+        do_sample: bool = True,
+    ) -> Tuple[ActionType, Optional[str], torch.Tensor]:
+        if self.policy is None or self.tokenizer is None:
+            raise RuntimeError("DefenderAgent policy/tokenizer not initialized")
+
         history = state.get_history_text()
-        prompt = f"{history}\nUser: {user_message}\nAssistant:"
-
-        if self.tokenizer is None:
-            return ActionType.REFUSE, "I cannot respond to that."
-
-        inputs = self.tokenizer(
+        prompt = f"{history}\nUser: {user_message}\nAssistant:" if history else f"User: {user_message}\nAssistant:"
+        inps = self.tokenizer(
             prompt, return_tensors="pt", truncation=True, max_length=self.max_length
         ).to(self.device)
 
-        with torch.no_grad():
-            decision_logits, _ = self.policy(**inputs)
-            decision_probs = torch.softmax(decision_logits, dim=-1)
-            if explore:
-                dist = Categorical(decision_probs)
-                action_idx = dist.sample().item()
-            else:
-                action_idx = decision_probs.argmax(dim=-1).item()
-
-        if action_idx == 0:  # respond
-            response = self._generate_response(state, user_message)
-            return ActionType.RESPOND, response
-        else:  # refuse
-            return ActionType.REFUSE, self._generate_refusal(user_message)
-
-    def _decide_rule_based(
-        self,
-        state: GameState,
-        user_message: str,
-        safety_score: float,
-        safety_threshold: float,
-    ) -> Tuple[ActionType, Optional[str]]:
-        """Rule-based decision making."""
-        # Refuse if safety score is below threshold
-        if safety_score < safety_threshold:
-            return ActionType.REFUSE, self._generate_refusal(user_message)
-
-        # Check conversation history for suspicious patterns
-        if self._is_suspicious_conversation(state, user_message):
-            return ActionType.REFUSE, self._generate_refusal(user_message)
-
-        # Otherwise, respond
-        response = self._generate_response(state, user_message)
-        return ActionType.RESPOND, response
-
-    def _is_suspicious_conversation(self, state: GameState, user_message: str) -> bool:
-        """Check if conversation is suspicious."""
-        suspicious_keywords = [
-            "hack",
-            "bomb",
-            "harm",
-            "illegal",
-            "weapon",
-            "drug",
-            "violence",
-            "attack",
-            "exploit",
-            "bypass",
-        ]
-
-        # Check current message
-        user_lower = user_message.lower()
-        if any(keyword in user_lower for keyword in suspicious_keywords):
-            return True
-
-        # Check history for escalation patterns
-        if len(state.conversation_history) > 0:
-            # If user keeps asking similar questions, might be suspicious
-            recent_messages = [
-                turn.user_message.lower() for turn in state.conversation_history[-2:]
-            ]
-            if len(recent_messages) >= 2:
-                # Check for repeated probing
-                if any(
-                    keyword in msg for msg in recent_messages for keyword in suspicious_keywords
-                ):
-                    return True
-
-        return False
-
-    def _generate_response(self, state: GameState, user_message: str) -> str:
-        """Generate a response to the user message."""
-        # Check if we have a model or policy with base_model
-        model_for_gen = None
-        if self.model is not None:
-            model_for_gen = self.model
-        elif self.policy is not None and hasattr(self.policy, "base_model"):
-            model_for_gen = self.policy.base_model
+        decision_logits, _ = self.policy(**inps)
+        probs = torch.softmax(decision_logits, dim=-1)
+        if explore:
+            dist = Categorical(probs)
+            action_idx = dist.sample()
+            logp_dec = dist.log_prob(action_idx)
+            action_idx = int(action_idx.item())
         else:
-            return (
-                "I understand your question, but I need more context to provide a helpful answer."
-            )
+            p_refuse = float(probs[0, 0].item())
+            action_idx = 0 if p_refuse >= float(refuse_threshold) else 1
+            logp_dec = torch.log(probs[0, action_idx].clamp_min(1e-12))
 
-        if self.tokenizer is None:
-            return (
-                "I understand your question, but I need more context to provide a helpful answer."
-            )
+        if action_idx == 0:
+            refusal = self._generate_refusal_with_logprob(inps, do_sample=do_sample)
+            return ActionType.REFUSE, refusal[0], (logp_dec + refusal[1]).squeeze()
 
-        # Prepare prompt
-        history = state.get_history_text()
-        prompt = f"{history}\nUser: {user_message}\nAssistant:"
-
-        inputs = self.tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=self.max_length
-        ).to(self.device)
+        if not generate_response:
+            return ActionType.RESPOND, "", logp_dec.squeeze()
 
         with torch.no_grad():
-            outputs = model_for_gen.generate(
-                inputs.input_ids,
-                attention_mask=inputs.attention_mask,
-                max_new_tokens=100,
-                temperature=self.temperature,
-                do_sample=True,
+            gen = self.policy.base_model.generate(
+                inps.input_ids,
+                attention_mask=inps.attention_mask,
+                max_new_tokens=24,
+                do_sample=bool(do_sample),
+                temperature=self.temperature if bool(do_sample) else None,
+                top_p=0.9 if bool(do_sample) else None,
                 pad_token_id=self.tokenizer.pad_token_id,
             )
+        full = gen[0].unsqueeze(0)
+        prompt_len = inps.input_ids.shape[1]
+        new_ids = full[:, prompt_len:]
+        if new_ids.numel() == 0:
+            return ActionType.RESPOND, "", logp_dec.squeeze()
 
-        generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        # Extract only the new response
-        response = generated_text[len(prompt) :].strip()
-        return response if response else "I'm not sure how to respond to that."
+        out = self.policy.base_model(input_ids=full, attention_mask=torch.ones_like(full))
+        logits = out.logits[:, :-1, :]
+        targets = full[:, 1:]
+        start = max(prompt_len - 1, 0)
+        sel_logits = logits[:, start:, :]
+        sel_targets = targets[:, start:]
+        sel_targets = sel_targets[:, -new_ids.shape[1] :]
+        log_probs = torch.log_softmax(sel_logits[:, -new_ids.shape[1] :, :], dim=-1)
+        token_logp = log_probs.gather(2, sel_targets.unsqueeze(-1)).squeeze(-1)
+        logp_gen = token_logp.sum()
+
+        ids = new_ids[0].detach().to("cpu").tolist()
+        txt = self.tokenizer.decode(ids, skip_special_tokens=True).strip()
+        return ActionType.RESPOND, txt, (logp_dec + logp_gen).squeeze()
+
+    def _generate_refusal_with_logprob(
+        self, prompt_inputs, do_sample: bool = True
+    ) -> Tuple[str, torch.Tensor]:
+        with torch.no_grad():
+            gen = self.policy.base_model.generate(
+                prompt_inputs.input_ids,
+                attention_mask=prompt_inputs.attention_mask,
+                max_new_tokens=24,
+                do_sample=bool(do_sample),
+                temperature=self.temperature if bool(do_sample) else None,
+                top_p=0.9 if bool(do_sample) else None,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+        full = gen[0].unsqueeze(0)
+        prompt_len = prompt_inputs.input_ids.shape[1]
+        new_ids = full[:, prompt_len:]
+        if new_ids.numel() == 0:
+            return "", torch.zeros((), device=self.device)
+        out = self.policy.base_model(input_ids=full, attention_mask=torch.ones_like(full))
+        logits = out.logits[:, :-1, :]
+        targets = full[:, 1:]
+        start = max(prompt_len - 1, 0)
+        sel_logits = logits[:, start:, :]
+        sel_targets = targets[:, start:]
+        sel_targets = sel_targets[:, -new_ids.shape[1] :]
+        log_probs = torch.log_softmax(sel_logits[:, -new_ids.shape[1] :, :], dim=-1)
+        token_logp = log_probs.gather(2, sel_targets.unsqueeze(-1)).squeeze(-1)
+        logp = token_logp.sum()
+        ids = new_ids[0].detach().to("cpu").tolist()
+        txt = self.tokenizer.decode(ids, skip_special_tokens=True).strip()
+        return txt, logp
 
     def _generate_refusal(self, user_message: str) -> str:
-        """Generate a refusal message."""
-        refusal_templates = [
-            "I can't help with that request.",
-            "I'm not able to assist with that.",
-            "I can't provide information on that topic.",
-            "I'm sorry, but I can't help with that.",
-        ]
-        import random
-
-        return random.choice(refusal_templates)
+        action, txt, _ = self.decide_action_with_logprob(
+            state=GameState(conversation_history=[], turn_number=0),
+            user_message=user_message,
+            explore=False,
+            generate_response=True,
+            refuse_threshold=0.0,
+            do_sample=True,
+        )
+        return txt
 
     def load_checkpoint(self, checkpoint_path: str):
-        """Load model checkpoint."""
         if self.policy is not None:
             self.policy.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
-            self.policy.eval()
+            self.policy.train()

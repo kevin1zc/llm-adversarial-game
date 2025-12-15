@@ -1,8 +1,5 @@
-"""Configuration management with proper type handling."""
-
 from dataclasses import dataclass, field
-from typing import List, Optional
-from pathlib import Path
+from typing import List
 import yaml
 
 
@@ -17,11 +14,15 @@ class ModelConfig:
 @dataclass
 class GameConfig:
     max_turns: int = 10
-    min_benign_turns: int = 1
     safety_threshold: float = 0.5
+    refuse_threshold: float = 0.5
     utility_weight: float = 0.3
     safety_weight: float = 0.7
     terminate_on_violation: bool = False
+    benign_prob: float = 0.2
+    lambda_violation: float = 5.0
+    mu_refusal: float = 0.2
+    gamma_turn: float = 0.01
 
 
 @dataclass
@@ -32,10 +33,12 @@ class TrainingConfig:
     defender_lr: float = 1e-5
     adversary_lr: float = 1e-5
     gamma: float = 0.99
-    save_interval: int = 1000
     eval_interval: int = 500
+    eval_num_malicious: int = 20
+    eval_num_benign: int = 20
     checkpoint_dir: str = "checkpoints"
     update_mode: str = "alternating"
+    warmstart_steps: int = 200
 
 
 @dataclass
@@ -66,13 +69,11 @@ class Config:
 
 
 def load_config(config_path: str) -> Config:
-    """Load configuration from YAML file with proper type conversion."""
     with open(config_path, "r") as f:
         raw = yaml.safe_load(f)
 
     config = Config()
 
-    # Parse model configs
     if "model" in raw:
         if "defender" in raw["model"]:
             d = raw["model"]["defender"]
@@ -90,19 +91,21 @@ def load_config(config_path: str) -> Config:
                 temperature=float(a.get("temperature", 0.9)),
                 use_learned_policy=bool(a.get("use_learned_policy", False)),
             )
-    # Parse game config
     if "game" in raw:
         g = raw["game"]
         config.game = GameConfig(
             max_turns=int(g.get("max_turns", 10)),
-            min_benign_turns=int(g.get("min_benign_turns", 1)),
             safety_threshold=float(g.get("safety_threshold", 0.5)),
+            refuse_threshold=float(g.get("refuse_threshold", 0.5)),
             utility_weight=float(g.get("utility_weight", 0.3)),
             safety_weight=float(g.get("safety_weight", 0.7)),
             terminate_on_violation=bool(g.get("terminate_on_violation", False)),
+            benign_prob=float(g.get("benign_prob", 0.2)),
+            lambda_violation=float(g.get("lambda_violation", 5.0)),
+            mu_refusal=float(g.get("mu_refusal", 0.2)),
+            gamma_turn=float(g.get("gamma_turn", 0.01)),
         )
 
-    # Parse training config
     if "training" in raw:
         t = raw["training"]
         config.training = TrainingConfig(
@@ -112,13 +115,14 @@ def load_config(config_path: str) -> Config:
             defender_lr=float(t.get("defender_lr", 1e-5)),
             adversary_lr=float(t.get("adversary_lr", 1e-5)),
             gamma=float(t.get("gamma", 0.99)),
-            save_interval=int(t.get("save_interval", 1000)),
             eval_interval=int(t.get("eval_interval", 500)),
+            eval_num_malicious=int(t.get("eval_num_malicious", 20)),
+            eval_num_benign=int(t.get("eval_num_benign", 20)),
             checkpoint_dir=str(t.get("checkpoint_dir", "checkpoints")),
             update_mode=str(t.get("update_mode", "alternating")),
+            warmstart_steps=int(t.get("warmstart_steps", 200)),
         )
 
-    # Parse data config
     if "data" in raw:
         d = raw["data"]
         config.data = DataConfig(
@@ -128,7 +132,6 @@ def load_config(config_path: str) -> Config:
             split_seed=int(d.get("split_seed", 42)),
         )
 
-    # Parse logging config
     if "logging" in raw:
         l = raw["logging"]
         config.logging = LoggingConfig(

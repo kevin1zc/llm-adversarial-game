@@ -1,5 +1,3 @@
-"""Main training script for multi-turn censorship game."""
-
 import argparse
 import json
 from pathlib import Path
@@ -10,32 +8,48 @@ from src.config import load_config
 from src.game.environment import CensorshipGameEnvironment
 from src.game.adversary import AdversaryAgent
 from src.game.defender import DefenderAgent
-from src.game.rewards import RewardFunction
 from src.data.dataset import load_datasets, load_xguard_splits, JailbreakDataset
-from src.training.self_play import SelfPlayTrainer
 from src.training.equilibrium import EquilibriumTrainer
 from src.training.logger import TrainingLogger
+from src.reporting.generate import generate_run_report
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train multi-turn censorship game")
     parser.add_argument("--config", type=str, default="configs/default.yaml")
-    parser.add_argument("--mode", type=str, choices=["self_play", "equilibrium"], default=None)
+    parser.add_argument("--mode", type=str, choices=["equilibrium"], default=None)
     parser.add_argument("--name", type=str, default=None, help="Experiment name for logging")
     parser.add_argument("--no-tensorboard", action="store_true", help="Disable TensorBoard logging")
+    parser.add_argument("--num-episodes", type=int, default=None, help="Override num_episodes")
+    parser.add_argument("--eval-interval", type=int, default=None, help="Override eval_interval")
+    parser.add_argument("--eval-num-malicious", type=int, default=None, help="Num malicious eval episodes")
+    parser.add_argument("--eval-num-benign", type=int, default=None, help="Num benign eval episodes")
+    parser.add_argument("--defender-lr", type=float, default=None, help="Override defender_lr")
+    parser.add_argument("--adversary-lr", type=float, default=None, help="Override adversary_lr")
+    parser.add_argument("--refuse-threshold", type=float, default=None, help="Override game.refuse_threshold")
     args = parser.parse_args()
 
-    # Load typed configuration
     config = load_config(args.config)
     training_mode = args.mode or config.training.mode
+    if args.num_episodes is not None:
+        config.training.num_episodes = int(args.num_episodes)
+    if args.eval_interval is not None:
+        config.training.eval_interval = int(args.eval_interval)
+    if args.eval_num_malicious is not None:
+        config.training.eval_num_malicious = int(args.eval_num_malicious)
+    if args.eval_num_benign is not None:
+        config.training.eval_num_benign = int(args.eval_num_benign)
+    if args.defender_lr is not None:
+        config.training.defender_lr = float(args.defender_lr)
+    if args.adversary_lr is not None:
+        config.training.adversary_lr = float(args.adversary_lr)
+    if args.refuse_threshold is not None:
+        config.game.refuse_threshold = float(args.refuse_threshold)
 
-    # Setup device
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Create experiment name
     experiment_name = args.name or f"{training_mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    # Initialize logger
     logger = TrainingLogger(
         log_dir=config.logging.log_dir,
         experiment_name=experiment_name,
@@ -43,7 +57,6 @@ def main():
         log_interval=config.logging.log_interval,
     )
 
-    # Log hyperparameters
     logger.log_hyperparameters(
         {
             "mode": training_mode,
@@ -65,11 +78,9 @@ def main():
     print(f"🎯 Mode: {training_mode}")
     print(f"📁 Experiment: {experiment_name}\n")
 
-    # Initialize components
     env = CensorshipGameEnvironment(
         max_turns=config.game.max_turns,
         safety_threshold=config.game.safety_threshold,
-        min_benign_turns=config.game.min_benign_turns,
         terminate_on_violation=config.game.terminate_on_violation,
     )
 
@@ -86,16 +97,9 @@ def main():
         device=device,
         max_length=config.adversary.max_length,
         temperature=config.adversary.temperature,
-        use_dataset=True,
         use_learned_policy=config.adversary.use_learned_policy,
     )
 
-    reward_fn = RewardFunction(
-        utility_weight=config.game.utility_weight,
-        safety_weight=config.game.safety_weight,
-    )
-
-    # Load datasets with XGuard splits and MHJ for testing
     x_train, x_val, x_test = load_xguard_splits(
         seed=config.data.split_seed, data_dir=config.data.data_dir
     )
@@ -105,58 +109,45 @@ def main():
     val_datasets = [x_val]
     test_datasets = [x_test, mhj_dataset]
 
-    # Optional extra datasets from config (excluding the default entries we already handled)
     extra_train = [name for name in config.data.train_datasets if name.lower() != "xguard"]
     if extra_train:
         train_datasets.extend(load_datasets(extra_train, data_dir=config.data.data_dir))
 
-    # Create checkpoint directory
-    checkpoint_dir = Path(config.training.checkpoint_dir)
-    checkpoint_dir.mkdir(exist_ok=True)
+    checkpoint_dir = Path(config.training.checkpoint_dir) / experiment_name
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize trainer
-    if training_mode == "equilibrium":
-        trainer = EquilibriumTrainer(
-            defender=defender,
-            adversary=adversary,
-            reward_fn=reward_fn,
-            env=env,
-            defender_lr=config.training.defender_lr,
-            adversary_lr=config.training.adversary_lr,
-            gamma=config.training.gamma,
-            update_mode=config.training.update_mode,
-            batch_size=config.training.batch_size,
-            logger=logger,
-        )
-    else:
-        trainer = SelfPlayTrainer(
-            defender=defender,
-            adversary=adversary,
-            reward_fn=reward_fn,
-            env=env,
-            learning_rate=config.training.defender_lr,
-            gamma=config.training.gamma,
-            logger=logger,
-        )
+    trainer = EquilibriumTrainer(
+        defender=defender,
+        adversary=adversary,
+        env=env,
+        defender_lr=config.training.defender_lr,
+        adversary_lr=config.training.adversary_lr,
+        gamma=config.training.gamma,
+        update_mode=config.training.update_mode,
+        batch_size=config.training.batch_size,
+        logger=logger,
+        benign_prob=config.game.benign_prob,
+        lambda_violation=config.game.lambda_violation,
+        mu_refusal=config.game.mu_refusal,
+        gamma_turn=config.game.gamma_turn,
+        warmstart_steps=config.training.warmstart_steps,
+    )
+    trainer.refuse_threshold = config.game.refuse_threshold
 
-    # Train
     training_stats = trainer.train(
         num_episodes=config.training.num_episodes,
         datasets=train_datasets,
         eval_interval=config.training.eval_interval,
         val_datasets=val_datasets if val_datasets else None,
+        eval_num_malicious=config.training.eval_num_malicious,
+        eval_num_benign=config.training.eval_num_benign,
     )
 
-    # Save checkpoints
-    if training_mode == "equilibrium":
-        trainer.save_checkpoints(
-            str(checkpoint_dir / "defender_final.pt"),
-            str(checkpoint_dir / "adversary_final.pt"),
-        )
-    elif defender.use_policy and defender.policy is not None:
-        torch.save(defender.policy.state_dict(), checkpoint_dir / "defender_final.pt")
+    trainer.save_checkpoints(
+        str(checkpoint_dir / "defender_final.pt"),
+        str(checkpoint_dir / "adversary_final.pt"),
+    )
 
-    # Save training stats
     stats_path = checkpoint_dir / "training_stats.json"
     serializable_stats = {
         k: (
@@ -169,12 +160,40 @@ def main():
     with open(stats_path, "w") as f:
         json.dump(serializable_stats, f, indent=2)
 
-    # Close logger
+    log_metrics_path = logger.experiment_dir / "metrics.json"
+    with open(log_metrics_path, "w") as f:
+        json.dump(serializable_stats, f, indent=2)
+
+    report_manifest = generate_run_report(
+        experiment_dir=logger.experiment_dir,
+        metrics=serializable_stats,
+        hparams={
+            "mode": training_mode,
+            "device": device,
+            "num_episodes": config.training.num_episodes,
+            "batch_size": config.training.batch_size,
+            "defender_lr": config.training.defender_lr,
+            "adversary_lr": config.training.adversary_lr,
+            "gamma": config.training.gamma,
+            "update_mode": config.training.update_mode,
+            "max_turns": config.game.max_turns,
+            "safety_threshold": config.game.safety_threshold,
+            "refuse_threshold": config.game.refuse_threshold,
+            "defender_model": config.defender.model_name,
+            "adversary_model": config.adversary.model_name,
+        },
+    )
+
     logger.close()
 
     print(f"\n✅ Training completed!")
     print(f"📁 Checkpoints saved to: {checkpoint_dir}")
     print(f"📊 Stats saved to: {stats_path}")
+    print(f"🧾 Report saved to: {logger.experiment_dir}")
+    if report_manifest.get("figures"):
+        print(f"   Figures: {len(report_manifest['figures'])}")
+    if report_manifest.get("tables"):
+        print(f"   Tables: {len(report_manifest['tables'])}")
 
 
 if __name__ == "__main__":

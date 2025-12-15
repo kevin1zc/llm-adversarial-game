@@ -30,6 +30,7 @@ dependencies = [
     "black>=24.8.0",
     "tensorboard>=2.14.0",
     "sentencepiece>=0.2.0",
+    "matplotlib>=3.7.5",
 ]
 
 [project.optional-dependencies]
